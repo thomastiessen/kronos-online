@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
 //  KRONOS ONLINE — Phase 3: Klassen · Skills · Items · Quests
-//  node server.js          → HTTP  (für ngrok)
-//  node server.js --ssl    → HTTPS (direkt)
+//  node server.js       → HTTP Port 80 + HTTPS Port 11000 (parallel)
+//  node server.js --dev → nur HTTP Port 11000 (lokale Entwicklung)
 // ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const fs      = require('fs');
@@ -9,18 +9,33 @@ const path    = require('path');
 const { Server } = require('socket.io');
 
 const app    = express();
-const PORT   = process.env.PORT || 11000;
-const useSSL = process.argv.includes('--ssl');
+const HTTPS_PORT = process.env.HTTPS_PORT || 11000;
+const HTTP_PORT  = process.env.HTTP_PORT  || 80;
+const isDev  = process.argv.includes('--dev');
 
-let server;
-if (useSSL) {
-  const sslOpts = { key: fs.readFileSync('key.pem'), cert: fs.readFileSync('cert.pem') };
-  server = require('https').createServer(sslOpts, app);
-} else {
-  server = require('http').createServer(app);
+// HTTP-Server (Port 80) — immer aktiv
+const httpServer = require('http').createServer(app);
+
+// HTTPS-Server (Port 11000) — wenn Zertifikat vorhanden
+let httpsServer = null;
+if (!isDev && fs.existsSync('key.pem') && fs.existsSync('cert.pem')) {
+  try {
+    const sslOpts = {
+      key:  fs.readFileSync('key.pem'),
+      cert: fs.readFileSync('cert.pem'),
+    };
+    httpsServer = require('https').createServer(sslOpts, app);
+  } catch(e) {
+    console.warn('SSL-Zertifikat konnte nicht geladen werden:', e.message);
+  }
 }
 
-const io = new Server(server, { cors: { origin: '*' }, pingInterval: 2000, pingTimeout: 5000 });
+// Socket.io an beide Server hängen
+const io = new Server(httpsServer || httpServer, { cors: { origin: '*' }, pingInterval: 2000, pingTimeout: 5000 });
+if (httpsServer) {
+  // Zweite Socket.io Instanz für HTTP-Server
+  new Server(httpServer, { cors: { origin: '*' }, pingInterval: 2000, pingTimeout: 5000 });
+}
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ══════════════════════════════════════════════════════════════
@@ -502,7 +517,20 @@ io.on('connection', socket => {
 // ══════════════════════════════════════════════════════════════
 initPlatforms();
 initMonsters();
-server.listen(PORT, ()=>{
-  const proto=useSSL?'https':'http';
-  console.log(`\n⚔  KRONOS ONLINE Phase 3 → ${proto}://localhost:${PORT}\n`);
+
+// HTTP immer starten
+httpServer.listen(isDev ? HTTPS_PORT : HTTP_PORT, () => {
+  console.log(`\n⚔  KRONOS ONLINE Phase 3`);
+  console.log(`   HTTP  → http://localhost:${isDev ? HTTPS_PORT : HTTP_PORT}`);
 });
+
+// HTTPS parallel starten wenn Zertifikat vorhanden
+if (httpsServer) {
+  httpsServer.listen(HTTPS_PORT, () => {
+    console.log(`   HTTPS → https://localhost:${HTTPS_PORT}`);
+    console.log(`   HTTPS → https://local.localhoast.de:${HTTPS_PORT}\n`);
+  });
+} else if (!isDev) {
+  console.log(`   ⚠  Kein SSL-Zertifikat — nur HTTP aktiv`);
+  console.log(`   → bash setup-letsencrypt.sh ausführen für HTTPS\n`);
+}
