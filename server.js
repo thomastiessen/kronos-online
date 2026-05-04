@@ -63,18 +63,19 @@ const CLASSES = {
 
 // ── SKILLS ───────────────────────────────────────────────────
 const SKILLS = {
-  // Krieger
-  slash:      { name:'Hieb',        mp:8,  cd:600,  dmgMult:1.4, range:50,  aoe:false, projectile:false },
-  shield_bash:{ name:'Schildstoß',  mp:15, cd:2000, dmgMult:0.8, range:40,  aoe:false, projectile:false, stun:600 },
-  war_cry:    { name:'Kriegsruf',   mp:25, cd:8000, dmgMult:0,   range:200, aoe:true,  projectile:false, buff:'atk', buffVal:10, buffDur:5000 },
-  // Magier
-  fireball:   { name:'Feuerball',   mp:18, cd:800,  dmgMult:2.0, range:300, aoe:true,  projectile:true,  aoeR:60 },
-  ice_spike:  { name:'Eisspitze',   mp:12, cd:1200, dmgMult:1.6, range:250, aoe:false, projectile:true,  slow:2000 },
-  blink:      { name:'Blinzeln',    mp:30, cd:5000, dmgMult:0,   range:180, aoe:false, projectile:false, teleport:true },
-  // Bogenschütze
-  arrow_shot: { name:'Pfeilschuss', mp:6,  cd:400,  dmgMult:1.2, range:350, aoe:false, projectile:true },
-  multi_shot: { name:'Mehrfachsch', mp:20, cd:3000, dmgMult:0.9, range:300, aoe:false, projectile:true, count:3 },
-  dodge_roll: { name:'Ausweichen',  mp:15, cd:4000, dmgMult:0,   range:0,   aoe:false, projectile:false, dash:true, dashDist:120, invDur:600 },
+  // Krieger — Nahkampf, kurze Reichweite
+  slash:      { name:'Hieb',        mp:8,  cd:500,  dmgMult:1.5, range:60,  aoe:false, hitW:60,  hitH:50 },
+  shield_bash:{ name:'Schildstoß',  mp:15, cd:2500, dmgMult:0.7, range:50,  aoe:false, hitW:50,  hitH:60,  stun:800 },
+  war_cry:    { name:'Kriegsruf',   mp:25, cd:8000, dmgMult:0,   range:0,   aoe:false,
+                buff:'atk', buffVal:10, buffDur:5000 },
+  // Magier — Fernkampf, Projektile
+  fireball:   { name:'Feuerball',   mp:18, cd:1000, dmgMult:2.2, range:350, aoe:true,  hitW:70,  hitH:70,  projectile:true },
+  ice_spike:  { name:'Eisspitze',   mp:12, cd:1400, dmgMult:1.6, range:320, aoe:false, hitW:30,  hitH:30,  projectile:true, slow:1500 },
+  blink:      { name:'Blinzeln',    mp:30, cd:5000, dmgMult:0,   range:180, aoe:false, teleport:true },
+  // Bogenschütze — langer schmaler Strahl
+  arrow_shot: { name:'Pfeilschuss', mp:6,  cd:400,  dmgMult:1.3, range:400, aoe:false, hitW:400, hitH:20,  projectile:true },
+  multi_shot: { name:'Mehrfachsch', mp:20, cd:3000, dmgMult:0.9, range:350, aoe:false, hitW:350, hitH:60,  projectile:true, count:3 },
+  dodge_roll: { name:'Ausweichen',  mp:15, cd:4000, dmgMult:0,   range:0,   aoe:false, dash:true, dashDist:130, invDur:700 },
 };
 
 // ── ITEM-DATENBANK ────────────────────────────────────────────
@@ -283,26 +284,24 @@ function respawnPlayer(socketId) {
 function executeSkill(player, skillId, targetX, targetY) {
   const sk = SKILLS[skillId];
   if (!sk) return;
-
   const cls = CLASSES[player.class];
-  if (!cls.skills.includes(skillId)) return; // falsche Klasse
-
+  if (!cls.skills.includes(skillId)) return;
   const now = Date.now();
-  const cdUntil = player.skillCooldowns[skillId] || 0;
-  if (now < cdUntil) return; // noch in Cooldown
-  if (player.mp < sk.mp) return; // kein MP
+  if (now < (player.skillCooldowns[skillId]||0)) return;
+  if (player.mp < sk.mp) return;
 
   player.mp -= sk.mp;
   player.skillCooldowns[skillId] = now + sk.cd;
 
-  // Teleport (Blink)
+  // ── Teleport (Blink) ──────────────────────────────────────
   if (sk.teleport) {
     const dx = targetX - player.x;
     player.x += Math.sign(dx) * Math.min(Math.abs(dx), sk.range);
+    player.x = Math.max(0, Math.min(MAP_WIDTH, player.x));
     io.to(player.id).emit('player:blink', { x:player.x, y:player.y });
   }
 
-  // Dash (Dodge Roll)
+  // ── Dash (Dodge Roll) ────────────────────────────────────
   if (sk.dash) {
     player.x += player.facing * sk.dashDist;
     player.x = Math.max(0, Math.min(MAP_WIDTH, player.x));
@@ -310,48 +309,66 @@ function executeSkill(player, skillId, targetX, targetY) {
     io.to(player.id).emit('player:dash', { x:player.x, invincible:sk.invDur });
   }
 
-  // Buff (War Cry)
+  // ── Buff (War Cry) — kein Schaden, nur Buff ──────────────
   if (sk.buff) {
     player.buffs.push({ stat:sk.buff, val:sk.buffVal, expiresAt:now+sk.buffDur });
     io.to(player.id).emit('player:buffed', { buff:sk.buff, val:sk.buffVal, dur:sk.buffDur });
+    io.to(player.id).emit('skill:used', { skillId, cdMs:sk.cd, mpLeft:player.mp });
+    return;
   }
 
-  // Schaden
+  // ── Schaden ──────────────────────────────────────────────
   if (sk.dmgMult > 0) {
     const baseDmg = Math.round(getEffectiveAtk(player) * sk.dmgMult);
+    // Hitbox: Rechteck VON Spielerposition in Blickrichtung
+    const px = player.x, py = player.y, f = player.facing;
+    const hw = (sk.hitW||50)/2, hh = (sk.hitH||50)/2;
+
+    // Für gerichtete Skills: Box startet an Spieler und geht in Blickrichtung
+    // Für AoE (Feuerball): Box um Zielpunkt
+    const isAoe = sk.aoe;
+
     monsters.forEach(mob => {
       if (!mob.alive) return;
-      const dx=Math.abs(mob.x-targetX), dy=Math.abs(mob.y-targetY);
-      const inRange = sk.aoe
-        ? (Math.abs(mob.x-targetX)<(sk.aoeR||sk.range) && Math.abs(mob.y-targetY)<(sk.aoeR||60))
-        : (dx<sk.range && dy<50);
-      if (!inRange) return;
+      let inRange = false;
 
+      if (isAoe) {
+        // AoE: Kreis um Zielpunkt (Feuerball-Einschlag)
+        const cx = targetX, cy = targetY;
+        inRange = Math.abs(mob.x-cx) < hw && Math.abs(mob.y-cy) < hh;
+      } else if (sk.projectile) {
+        // Projektil: langer Strahl vom Spieler in Blickrichtung
+        // Mob muss auf gleicher Y-Höhe UND in Reichweite auf X-Achse sein
+        const mobRelX = (mob.x - px) * f; // positiv = vor dem Spieler
+        inRange = mobRelX > 0 && mobRelX < sk.range && Math.abs(mob.y - py) < hh;
+      } else {
+        // Nahkampf: Box direkt vor dem Spieler
+        const mobRelX = (mob.x - px) * f;
+        inRange = mobRelX > -10 && mobRelX < sk.range && Math.abs(mob.y - py) < hh;
+      }
+
+      if (!inRange) return;
       const dmg = baseDmg + Math.floor(Math.random()*6);
       mob.hp -= dmg;
-      mob.knockDir = mob.x>player.x ? 1 : -1;
-      mob.knockback = sk.stun || 400;
-
+      mob.knockDir = mob.x > px ? 1 : -1;
+      mob.knockback = sk.stun || 500;
       io.emit('mob:hit', { mobId:mob.id, dmg, x:mob.x, y:mob.y, skill:skillId });
 
-      if (mob.hp<=0) {
-        mob.alive=false;
+      if (mob.hp <= 0) {
+        mob.alive = false;
         io.emit('mob:died', { mobId:mob.id, x:mob.x, y:mob.y });
         rewardKill(player, mob);
-        const [si] = [parseInt(mob.id.split('_')[1])];
+        const si = parseInt(mob.id.split('_')[1]);
         setTimeout(()=>{
-          const sp=MONSTER_SPAWNS[si]; const t=MOB_TYPES[sp.type];
+          const sp=MONSTER_SPAWNS[si], t=MOB_TYPES[sp.type];
           mob.x=sp.x; mob.y=sp.y; mob.hp=t.hp; mob.alive=true; mob.velY=0;
           io.emit('mob:respawned', { mobId:mob.id, x:mob.x, y:mob.y });
-        }, mob.type==='boss' ? 30000 : 8000);
+        }, mob.type==='boss'?30000:8000);
       }
     });
   }
 
-  // Cooldown ans Client zurückmelden
-  io.to(player.id).emit('skill:used', {
-    skillId, cdMs:sk.cd, mpLeft:player.mp
-  });
+  io.to(player.id).emit('skill:used', { skillId, cdMs:sk.cd, mpLeft:player.mp });
 }
 
 function rewardKill(player, mob) {
@@ -453,38 +470,42 @@ io.on('connection', socket => {
     p.lastUpdate=Date.now();
   });
 
-  // Basis-Angriff (kein Skill)
+  // Basis-Angriff — keine Abklingzeit, kein MP-Kosten
   socket.on('player:attack', data => {
     const p=players[socket.id]; if (!p||p.dead) return;
-    if (p.mp<5) return;
-    p.mp-=5;
-    const HIT_R=38, hitX=data.x, hitY=data.y;
+
+    // Hitbox: 55px breit, 50px hoch, direkt vor dem Spieler
+    const HIT_W=55, HIT_H=50;
+    const px=p.x, py=p.y, f=p.facing;
+
     monsters.forEach(mob => {
       if (!mob.alive) return;
-      if (Math.abs(mob.x-hitX)<HIT_R && Math.abs(mob.y-hitY)<HIT_R) {
-        const dmg = Math.round(getEffectiveAtk(p)*1) + Math.floor(Math.random()*5);
-        mob.hp-=dmg;
-        mob.knockDir=mob.x>p.x?1:-1; mob.knockback=800;
-        io.emit('mob:hit', { mobId:mob.id, dmg, x:mob.x, y:mob.y });
-        if (mob.hp<=0) {
-          mob.alive=false;
-          io.emit('mob:died', { mobId:mob.id, x:mob.x, y:mob.y });
-          rewardKill(p, mob);
-          const si=parseInt(mob.id.split('_')[1]);
-          setTimeout(()=>{
-            const sp=MONSTER_SPAWNS[si], t=MOB_TYPES[sp.type];
-            mob.x=sp.x; mob.y=sp.y; mob.hp=t.hp; mob.alive=true; mob.velY=0;
-            io.emit('mob:respawned', { mobId:mob.id, x:mob.x, y:mob.y });
-          }, mob.type==='boss'?30000:8000);
-        }
+      const mobRelX = (mob.x - px) * f; // positiv = vor dem Spieler
+      if (mobRelX < -10 || mobRelX > HIT_W) return;
+      if (Math.abs(mob.y - py) > HIT_H) return;
+
+      const dmg = Math.round(getEffectiveAtk(p)) + Math.floor(Math.random()*5);
+      mob.hp -= dmg;
+      mob.knockDir = mob.x>px?1:-1; mob.knockback=800;
+      io.emit('mob:hit', { mobId:mob.id, dmg, x:mob.x, y:mob.y });
+      if (mob.hp<=0) {
+        mob.alive=false;
+        io.emit('mob:died', { mobId:mob.id, x:mob.x, y:mob.y });
+        rewardKill(p, mob);
+        const si=parseInt(mob.id.split('_')[1]);
+        setTimeout(()=>{
+          const sp=MONSTER_SPAWNS[si], t=MOB_TYPES[sp.type];
+          mob.x=sp.x; mob.y=sp.y; mob.hp=t.hp; mob.alive=true; mob.velY=0;
+          io.emit('mob:respawned', { mobId:mob.id, x:mob.x, y:mob.y });
+        }, mob.type==='boss'?30000:8000);
       }
     });
-    io.to(socket.id).emit('player:mp', { mp:p.mp });
   });
 
   // Skill-Aktivierung
-  socket.on('player:skill', ({ skillId, targetX, targetY }) => {
+  socket.on('player:skill', ({ skillId, targetX, targetY, facing }) => {
     const p=players[socket.id]; if (!p||p.dead) return;
+    if (facing) p.facing = facing; // Richtung vom Client übernehmen
     executeSkill(p, skillId, targetX, targetY);
   });
 
