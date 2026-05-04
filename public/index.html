@@ -346,8 +346,9 @@ function buildSkillbar(cls){
 function useSkill(skillId){
   if(!gameScene||gameScene.chatOpen) return;
   const p=gameScene.player;
-  socket.emit('player:skill',{ skillId, targetX:p.x+gameScene.state.facing*80, targetY:p.y });
-  gameScene.playSkillFx(skillId, p.x+gameScene.state.facing*80, p.y);
+  const f=gameScene.state.facing;
+  socket.emit('player:skill',{ skillId, targetX:p.x, targetY:p.y, facing:f });
+  gameScene.playSkillFx(skillId, p.x, p.y);
 }
 
 socket.on('skill:used',({skillId,cdMs,mpLeft})=>{
@@ -681,6 +682,8 @@ class GameScene extends Phaser.Scene {
       this.state.attacking=false; this.state.dashing=false;
       this.player.setPosition(x,y).setAlpha(1);
       this.player.body.setEnable(true).setVelocity(0,0);
+      // Inventar schließen falls offen
+      document.getElementById('inv-panel').style.display='none';
       if(this.deathOverlay){this.deathOverlay.destroy();this.deathText.destroy();this.respawnText.destroy();this.deathOverlay=this.deathText=this.respawnText=null;}
       updateHUD(); this.cameras.main.flash(300,100,180,255);
     });
@@ -1030,7 +1033,6 @@ class GameScene extends Phaser.Scene {
   update(time,delta){
     const s=this.state, p=this.player, body=p.body, onGround=body.blocked.down, dt=delta/1000;
     if(s.dead||this.chatOpen) return;
-    if(s.attackCooldown>0) s.attackCooldown-=delta;
     if(s.dashCooldown>0)   s.dashCooldown-=delta;
     if(s.invincible>0){ s.invincible-=delta; p.setAlpha(Math.floor(time/120)%2===0?1:.35); } else p.setAlpha(1);
 
@@ -1064,9 +1066,10 @@ class GameScene extends Phaser.Scene {
     if(wantJump&&onGround){body.setVelocityY(-420);mobileInput.jump=false;}
 
     const wantAtk=Phaser.Input.Keyboard.JustDown(this.keys.x)||mobileInput.attack;
-    if(wantAtk&&s.attackCooldown<=0){
-      s.attacking=true; s.attackCooldown=500;
-      socket.emit('player:attack',{x:p.x+s.facing*32,y:p.y});
+    if(wantAtk&&!s.dashing){
+      s.attacking=true;
+      // Kein Cooldown — nur kurze Animations-Sperrzeit (200ms)
+      socket.emit('player:attack',{x:p.x, y:p.y, facing:s.facing});
       this.playBasicAttackFx(p.x, p.y, s.facing, this.myClass);
       this.time.delayedCall(200,()=>s.attacking=false);
       mobileInput.attack=false;
